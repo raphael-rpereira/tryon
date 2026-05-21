@@ -1,0 +1,385 @@
+import React, { useState, useRef } from 'react';
+import { Upload, Plus, Sparkles, Image as ImageIcon, Trash2, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+
+const apiKey = ""; // A chave da API será fornecida pelo ambiente de execução
+
+export default function App() {
+  const [model, setModel] = useState(null);
+  const [wardrobe, setWardrobe] = useState([]);
+  const [selectedClothes, setSelectedClothes] = useState([]);
+  const [generatedLooks, setGeneratedLooks] = useState([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState(null);
+
+  const modelInputRef = useRef(null);
+  const wardrobeInputRef = useRef(null);
+
+  // Função para ler arquivo e converter para Base64 com MimeType
+  const processFile = (file) => {
+    return new Promise((resolve, reject) => {
+      if (!file.type.startsWith('image/')) {
+        reject(new Error('Por favor, selecione apenas arquivos de imagem.'));
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result;
+        const mimeType = result.match(/data:(.*);base64/)[1];
+        const rawBase64 = result.split(',')[1];
+        resolve({ preview: result, mimeType, rawBase64 });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Upload do Modelo
+  const handleModelUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      try {
+        const processed = await processFile(file);
+        setModel({ ...processed, name: file.name });
+        setError(null);
+      } catch (err) {
+        setError(err.message);
+      }
+    }
+  };
+
+  // Upload de Roupa para o Guarda-roupa
+  const handleWardrobeUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      try {
+        const newClothes = await Promise.all(
+          files.map(async (file) => {
+            const processed = await processFile(file);
+            return {
+              id: crypto.randomUUID(),
+              name: file.name,
+              ...processed,
+            };
+          })
+        );
+        setWardrobe((prev) => [...prev, ...newClothes]);
+        setError(null);
+      } catch (err) {
+        setError(err.message);
+      }
+    }
+  };
+
+  const removeCloth = (id) => {
+    setWardrobe((prev) => prev.filter((cloth) => cloth.id !== id));
+    setSelectedClothes((prev) => prev.filter((clothId) => clothId !== id));
+  };
+
+  const toggleSelectCloth = (id) => {
+    setSelectedClothes((prev) =>
+      prev.includes(id) ? prev.filter((clothId) => clothId !== id) : [...prev, id]
+    );
+  };
+
+  // Implementação de Backoff Exponencial para a API
+  const fetchWithRetry = async (url, options, retries = 5) => {
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    for (let i = 0; i < retries; i++) {
+      try {
+        const res = await fetch(url, options);
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        return await res.json();
+      } catch (e) {
+        if (i === retries - 1) throw e;
+        console.warn(`Tentativa ${i + 1} falhou. Tentando novamente em ${delays[i]}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delays[i]));
+      }
+    }
+  };
+
+  // Geração do Look usando Gemini Image API
+  const generateLook = async () => {
+    if (!model) {
+      setError("Por favor, carregue uma foto do modelo primeiro.");
+      return;
+    }
+    if (selectedClothes.length === 0) {
+      setError("Selecione pelo menos uma peça de roupa do guarda-roupa.");
+      return;
+    }
+
+    setIsGenerating(true);
+    setError(null);
+
+    try {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKey}`;
+
+      const parts = [
+        {
+          text: "Gere uma imagem realista e de alta qualidade desta pessoa (primeira imagem) vestindo as peças de roupa fornecidas nas imagens seguintes. Mantenha as características físicas, rosto e proporções do modelo originais. O caimento das roupas deve parecer natural e integrado ao corpo. Fundo neutro de estúdio fotográfico.",
+        },
+        { inlineData: { mimeType: model.mimeType, data: model.rawBase64 } },
+      ];
+
+      // Adiciona as roupas selecionadas
+      selectedClothes.forEach((id) => {
+        const cloth = wardrobe.find((c) => c.id === id);
+        if (cloth) {
+          parts.push({
+            inlineData: { mimeType: cloth.mimeType, data: cloth.rawBase64 },
+          });
+        }
+      });
+
+      const payload = {
+        contents: [
+          {
+            role: "user",
+            parts: parts,
+          },
+        ],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+        },
+      };
+
+      const response = await fetchWithRetry(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      // Extrair a imagem gerada (Base64)
+      const generatedPart = response.candidates?.[0]?.content?.parts?.find(
+        (p) => p.inlineData
+      );
+
+      if (generatedPart && generatedPart.inlineData) {
+        const newLookUrl = `data:${generatedPart.inlineData.mimeType};base64,${generatedPart.inlineData.data}`;
+        setGeneratedLooks((prev) => [newLookUrl, ...prev]);
+      } else {
+        throw new Error("A API não retornou uma imagem válida.");
+      }
+    } catch (err) {
+      setError(
+        "Erro ao gerar o look. Verifique sua conexão ou tente novamente mais tarde. " +
+          err.message
+      );
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-50 text-neutral-900 font-sans p-4 md:p-8">
+      <div className="max-w-6xl mx-auto space-y-8">
+        
+        {/* Header */}
+        <header className="text-center space-y-2 mb-10">
+          <h1 className="text-4xl font-bold tracking-tight text-neutral-900 flex items-center justify-center gap-3">
+            <Sparkles className="w-8 h-8 text-indigo-600" />
+            Provador Virtual IA
+          </h1>
+          <p className="text-neutral-500 max-w-2xl mx-auto">
+            Faça upload do seu modelo e das suas roupas. Escolha as peças do guarda-roupa e deixe a inteligência artificial montar o seu look perfeito.
+          </p>
+        </header>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
+            <p>{error}</p>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          
+          {/* Coluna Esquerda: Inputs (Modelo e Guarda-roupa) */}
+          <div className="lg:col-span-1 space-y-8">
+            
+            {/* Seção do Modelo */}
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-neutral-200">
+              <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
+                <ImageIcon className="w-5 h-5 text-indigo-500" />
+                Seu Modelo
+              </h2>
+              
+              <div className="relative group rounded-xl overflow-hidden bg-neutral-100 border-2 border-dashed border-neutral-300 transition-all hover:border-indigo-400">
+                {model ? (
+                  <div className="relative aspect-[3/4] w-full">
+                    <img 
+                      src={model.preview} 
+                      alt="Modelo" 
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <button 
+                        onClick={() => modelInputRef.current?.click()}
+                        className="bg-white text-neutral-900 px-4 py-2 rounded-full font-medium text-sm flex items-center gap-2 hover:bg-neutral-100 transition-colors"
+                      >
+                        <Upload className="w-4 h-4" />
+                        Trocar Foto
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button 
+                    onClick={() => modelInputRef.current?.click()}
+                    className="w-full aspect-[3/4] flex flex-col items-center justify-center p-6 text-neutral-500 hover:text-indigo-600 transition-colors"
+                  >
+                    <Upload className="w-8 h-8 mb-3" />
+                    <span className="font-medium">Carregar foto do modelo</span>
+                    <span className="text-xs text-neutral-400 mt-1 text-center">JPG, PNG (Corpo inteiro ou meio corpo)</span>
+                  </button>
+                )}
+                <input 
+                  type="file" 
+                  ref={modelInputRef}
+                  onChange={handleModelUpload}
+                  accept="image/*"
+                  className="hidden" 
+                />
+              </div>
+            </section>
+
+          </div>
+
+          {/* Coluna Central/Direita: Guarda-roupa e Geração */}
+          <div className="lg:col-span-2 space-y-8">
+            
+            {/* Seção do Guarda-roupa */}
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-neutral-200">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-4">
+                <h2 className="text-xl font-semibold flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600">
+                    👕
+                  </div>
+                  Meu Guarda-Roupa
+                </h2>
+                <button 
+                  onClick={() => wardrobeInputRef.current?.click()}
+                  className="bg-neutral-900 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors flex items-center gap-2 justify-center"
+                >
+                  <Plus className="w-4 h-4" />
+                  Adicionar Roupas
+                </button>
+                <input 
+                  type="file" 
+                  ref={wardrobeInputRef}
+                  onChange={handleWardrobeUpload}
+                  accept="image/*"
+                  multiple
+                  className="hidden" 
+                />
+              </div>
+
+              {wardrobe.length === 0 ? (
+                <div className="text-center py-12 px-4 bg-neutral-50 rounded-xl border border-dashed border-neutral-300">
+                  <p className="text-neutral-500">Seu guarda-roupa está vazio.</p>
+                  <p className="text-sm text-neutral-400 mt-1">Adicione peças para começar a montar looks.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                  {wardrobe.map((cloth) => {
+                    const isSelected = selectedClothes.includes(cloth.id);
+                    return (
+                      <div 
+                        key={cloth.id} 
+                        className={`relative group rounded-xl overflow-hidden border-2 transition-all cursor-pointer ${
+                          isSelected ? 'border-indigo-600 shadow-md' : 'border-neutral-200 hover:border-indigo-300'
+                        }`}
+                        onClick={() => toggleSelectCloth(cloth.id)}
+                      >
+                        <div className="aspect-square w-full bg-neutral-100">
+                          <img 
+                            src={cloth.preview} 
+                            alt={cloth.name} 
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        
+                        {/* Indicador de Seleção */}
+                        <div className={`absolute top-2 right-2 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${
+                          isSelected ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-white/80 bg-black/20'
+                        }`}>
+                          {isSelected && <CheckCircle className="w-4 h-4" />}
+                        </div>
+
+                        {/* Botão de Excluir */}
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeCloth(cloth.id);
+                          }}
+                          className="absolute bottom-2 right-2 p-1.5 bg-white text-red-500 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50"
+                          title="Remover peça"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* Ações e Resultados */}
+            <section className="space-y-6">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-indigo-50 p-6 rounded-2xl border border-indigo-100">
+                <div>
+                  <h3 className="font-semibold text-indigo-900">Pronto para vestir?</h3>
+                  <p className="text-sm text-indigo-700/80 mt-1">
+                    {selectedClothes.length} {selectedClothes.length === 1 ? 'peça selecionada' : 'peças selecionadas'}
+                  </p>
+                </div>
+                <button
+                  onClick={generateLook}
+                  disabled={isGenerating || !model || selectedClothes.length === 0}
+                  className={`w-full sm:w-auto px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all ${
+                    isGenerating || !model || selectedClothes.length === 0
+                      ? 'bg-neutral-200 text-neutral-400 cursor-not-allowed'
+                      : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg hover:shadow-indigo-200'
+                  }`}
+                >
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Costurando look...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-5 h-5" />
+                      Gerar Look
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Galeria de Resultados */}
+              {generatedLooks.length > 0 && (
+                <div className="space-y-4">
+                  <h3 className="text-xl font-semibold flex items-center gap-2">
+                    Looks Gerados
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                    {generatedLooks.map((look, index) => (
+                      <div key={index} className="rounded-2xl overflow-hidden border border-neutral-200 shadow-sm bg-white">
+                        <img 
+                          src={look} 
+                          alt={`Look gerado ${index + 1}`} 
+                          className="w-full h-auto object-contain"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
